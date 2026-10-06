@@ -1,0 +1,47 @@
+# CI for the-hardline/the-hardline.github.io: on a pull request, pre-commit over the whole tree
+# (gitleaks alone).
+# Every action is GitHub's own and pinned by commit SHA; the only credential is the run's github.token.
+name: CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # pre-commit over the hooks .pre-commit-config.yaml lists: gitleaks alone.
+  check:
+    name: pre-commit (whole tree)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # Every hook environment is rebuilt from scratch on each run without this.
+      # The key is the config, so a `rev:` bump invalidates it automatically.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-py3.12-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: install pre-commit
+        run: python -m pip install --disable-pip-version-check "pre-commit==4.6.2"
+
+      # --all-files, not just the diff: a hosted runner is where the whole-tree
+      # pass is free. --show-diff-on-failure prints exactly what a hook would
+      # have flagged, so a red run is actionable without reproducing it locally.
+      - name: pre-commit run --all-files
+        run: pre-commit run --all-files --show-diff-on-failure --color=always
+
+      # The whole-tree secret scan is manual-stage on purpose: `gitleaks dir`
+      # reads untracked and gitignored files, so locally it would block commits
+      # on content that is not in the commit. Here the checkout IS the tracked
+      # tree, which is exactly what it should sweep.
+      - name: gitleaks whole-tree scan
+        run: pre-commit run gitleaks-dir --hook-stage manual --all-files --color=always

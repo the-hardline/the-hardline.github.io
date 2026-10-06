@@ -1,0 +1,110 @@
+# auto-merge.yml — every ready pull request merges itself once the required check passes, and
+# the job then closes the issues it names and deletes its branch.
+#
+# When a pull request opens ready, is reopened, leaves draft, or takes a new push, this job turns
+# on GitHub's auto-merge with a merge commit, the one merge method the repository allows. The
+# ruleset on `main` then merges it as soon as the checks it requires pass on its head. A
+# draft is left alone: a pull request opened as a draft starts this job when it is marked ready.
+#
+# GitHub offers auto-merge only on a pull request that cannot merge yet. One whose required check
+# already passed, such as a draft marked ready after its run went green, is refused with
+# `clean status`; that one is merged directly, pinned to the head the check passed on
+# (https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/automatically-merging-a-pull-request).
+#
+# The job authenticates with the repository's GITHUB_TOKEN, so GitHub records the merge as made by
+# that token, and an event that token causes starts nothing further
+# (https://docs.github.com/en/actions/concepts/security/github_token, §When GITHUB_TOKEN
+# triggers workflow runs). The merge therefore closes none of the issues the pull request's
+# closing keywords name, and the repository's delete-on-merge setting leaves the head branch in
+# place. The job does both itself: it waits on the pull request until it merges, then closes each
+# issue in this repository that a closing keyword in the pull request's body names (`Closes #<n>`,
+# GitHub's keywords, read from the body over the REST API) and deletes the head branch. It stops
+# waiting when the pull request closes unmerged, when a required check fails, or when a newer push starts
+# a newer run, which the concurrency group cancels this one for.
+#
+# A repository whose ruleset on `main` requires no check would merge a pull request the moment
+# auto-merge went on, before any check ran, so there the job only says so and merges nothing.
+#
+# The job runs no code from the pull request: it checks nothing out and calls only `gh`.
+name: auto-merge
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  merge:
+    name: auto-merge and clean up
+    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      checks: read
+      contents: write
+      issues: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+    steps:
+      - name: Read the checks the ruleset on main requires
+        id: rules
+        run: |
+          required=$(gh api "repos/$GH_REPO/rules/branches/main" \
+            --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context]')
+          echo "required checks: $required"
+          echo "required=$required" >> "$GITHUB_OUTPUT"
+          if [ "$required" = "[]" ]; then
+            echo "::notice::main requires no status check, so auto-merge would merge before any check ran; nothing is merged until the ruleset requires one."
+          fi
+
+      - name: Turn on auto-merge, or merge a pull request whose check already passed
+        if: steps.rules.outputs.required != '[]'
+        run: |
+          if out=$(gh pr merge "$PR" --auto --merge 2>&1); then
+            echo "$out"
+            exit 0
+          fi
+          echo "$out"
+          case "$out" in
+            *"clean status"*) gh pr merge "$PR" --merge --match-head-commit "$HEAD_SHA" ;;
+            *) exit 1 ;;
+          esac
+
+      - name: Wait for the merge
+        id: wait
+        if: steps.rules.outputs.required != '[]'
+        env:
+          REQUIRED: ${{ steps.rules.outputs.required }}
+        run: |
+          while :; do
+            state=$(gh pr view "$PR" --json state --jq .state)
+            case "$state" in
+              MERGED) echo "merged=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+              CLOSED) echo "closed unmerged"; exit 0 ;;
+            esac
+            failed=$(gh api "repos/$GH_REPO/commits/$HEAD_SHA/check-runs" \
+              --jq "[.check_runs[] | select((.name | IN($REQUIRED[])) and ((.conclusion // \"\") | test(\"failure|timed_out|cancelled|action_required\")))] | length")
+            if [ "$failed" -gt 0 ]; then echo "a required check failed; the next push starts a new run"; exit 0; fi
+            sleep 20
+          done
+
+      - name: Close the issues the pull request closes, and delete its branch
+        if: steps.wait.outputs.merged == 'true'
+        run: |
+          gh api "repos/$GH_REPO/pulls/$PR" --jq '.body // ""' |
+            grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?):? +#[0-9]+' | grep -oE '[0-9]+$' | sort -u |
+          while read -r n; do
+            gh issue close "$n" --reason completed --comment "Closed by #$PR, merged by the auto-merge workflow." || echo "issue #$n not closed"
+          done
+          gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$HEAD_REF" || echo "branch $HEAD_REF already gone"
