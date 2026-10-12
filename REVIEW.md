@@ -29,6 +29,11 @@ pull request, report Important findings only.
 
 Post no findings on what the `pre-commit (whole tree)` check already enforces: gitleaks.
 
+Post none on what this review cannot see: a file, skill or setting that lives in another
+repository, such as a managed skill in nebuchadnezzar's `skills/` folder; whether a paired pull
+request elsewhere has merged; or whether this pull request should still be a draft. The review
+reads this repository only.
+
 ## Verification bar
 
 A claim about what a file or instruction does cites the `file:line` it rests on, not an inference
