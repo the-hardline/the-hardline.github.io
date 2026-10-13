@@ -1,9 +1,8 @@
-# auto-merge.yml — every ready pull request merges itself once the required check passes, and
-# the job then closes the issues it names and deletes its branch.
+# auto-merge.yml — every ready pull request merges itself once the required checks pass.
 #
 # When a pull request opens ready, is reopened, leaves draft, or takes a new push, this job turns
-# on GitHub's auto-merge with a merge commit, the one merge method the repository allows. The
-# ruleset on `main` then merges it as soon as the checks it requires pass on its head. A
+# on GitHub's auto-merge with a merge commit, the one merge method the repository allows, and
+# ends. The ruleset on `main` then merges it as soon as the checks it requires pass on its head. A
 # draft is left alone: a pull request opened as a draft starts this job when it is marked ready.
 #
 # GitHub offers auto-merge only on a pull request that cannot merge yet. One whose required check
@@ -11,25 +10,32 @@
 # `clean status`; that one is merged directly, pinned to the head the check passed on
 # (https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/automatically-merging-a-pull-request).
 #
-# The job authenticates with the repository's GITHUB_TOKEN, so GitHub records the merge as made by
-# that token, and an event that token causes starts nothing further
-# (https://docs.github.com/en/actions/concepts/security/github_token, §When GITHUB_TOKEN
-# triggers workflow runs). The merge therefore closes none of the issues the pull request's
-# closing keywords name, and the repository's delete-on-merge setting leaves the head branch in
-# place. The job does both itself: it waits on the pull request until it merges, then closes each
-# issue in this repository that a closing keyword in the pull request's body names (`Closes #<n>`,
-# GitHub's keywords, read from the body over the REST API) and deletes the head branch. It stops
-# waiting when the pull request closes unmerged, when a required check fails, or when a newer push starts
-# a newer run, which the concurrency group cancels this one for.
+# The job acts with an installation token of the organisation's GitHub App `the-hardline-build`,
+# minted by GitHub's `actions/create-github-app-token` and narrowed to this repository with
+# contents and pull requests write. GitHub records the merge as the App's, an ordinary actor's
+# event, so it closes the issues the pull request's closing keywords name, deletes the head branch
+# under the repository's delete-on-merge setting and starts the workflows a merge starts, with
+# nothing left for this job to do. A merge made with the run's GITHUB_TOKEN would start none of
+# that (https://docs.github.com/en/actions/concepts/security/github_token, §When GITHUB_TOKEN
+# triggers workflow runs). The App bypasses no ruleset (construct ADR-0047), so its merge waits for every
+# required check.
+#
+# The App's private key is a secret of the `auto-merge` environment, whose deployment-branch rule
+# admits `main` alone. The job runs on `pull_request_target`, so GitHub runs `main`'s copy of this
+# file with `main` as the job's ref: a pull request that edits this file cannot change the job that
+# reads the key, and no job running on a pull request's own ref can read it. The job runs no code
+# from the pull request: it checks nothing out, calls only `gh`, and passes payload fields to it
+# through `env`.
 #
 # A repository whose ruleset on `main` requires no check would merge a pull request the moment
 # auto-merge went on, before any check ran, so there the job only says so and merges nothing.
 #
-# The job runs no code from the pull request: it checks nothing out and calls only `gh`.
+# Ladder: GitHub feature, native auto-merge; the token comes from GitHub's own
+# actions/create-github-app-token, pinned by commit SHA like every action here.
 name: auto-merge
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, reopened, ready_for_review, synchronize]
 
 permissions:
@@ -41,24 +47,22 @@ concurrency:
 
 jobs:
   merge:
-    name: auto-merge and clean up
+    name: auto-merge
     if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
+    environment: auto-merge
     permissions:
-      checks: read
-      contents: write
-      issues: write
-      pull-requests: write
+      contents: read
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
       PR: ${{ github.event.pull_request.number }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      HEAD_REF: ${{ github.event.pull_request.head.ref }}
     steps:
       - name: Read the checks the ruleset on main requires
         id: rules
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           required=$(gh api "repos/$GH_REPO/rules/branches/main" \
             --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context]')
@@ -68,8 +72,21 @@ jobs:
             echo "::notice::main requires no status check, so auto-merge would merge before any check ran; nothing is merged until the ruleset requires one."
           fi
 
+      - name: Mint the App's token for this repository
+        id: app
+        if: steps.rules.outputs.required != '[]'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.BUILD_GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ secrets.BUILD_GITHUB_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Turn on auto-merge, or merge a pull request whose check already passed
         if: steps.rules.outputs.required != '[]'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
           if out=$(gh pr merge "$PR" --auto --merge 2>&1); then
             echo "$out"
@@ -80,31 +97,3 @@ jobs:
             *"clean status"*) gh pr merge "$PR" --merge --match-head-commit "$HEAD_SHA" ;;
             *) exit 1 ;;
           esac
-
-      - name: Wait for the merge
-        id: wait
-        if: steps.rules.outputs.required != '[]'
-        env:
-          REQUIRED: ${{ steps.rules.outputs.required }}
-        run: |
-          while :; do
-            state=$(gh pr view "$PR" --json state --jq .state)
-            case "$state" in
-              MERGED) echo "merged=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
-              CLOSED) echo "closed unmerged"; exit 0 ;;
-            esac
-            failed=$(gh api "repos/$GH_REPO/commits/$HEAD_SHA/check-runs" \
-              --jq "[.check_runs[] | select((.name | IN($REQUIRED[])) and ((.conclusion // \"\") | test(\"failure|timed_out|cancelled|action_required\")))] | length")
-            if [ "$failed" -gt 0 ]; then echo "a required check failed; the next push starts a new run"; exit 0; fi
-            sleep 20
-          done
-
-      - name: Close the issues the pull request closes, and delete its branch
-        if: steps.wait.outputs.merged == 'true'
-        run: |
-          gh api "repos/$GH_REPO/pulls/$PR" --jq '.body // ""' |
-            grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?):? +#[0-9]+' | grep -oE '[0-9]+$' | sort -u |
-          while read -r n; do
-            gh issue close "$n" --reason completed --comment "Closed by #$PR, merged by the auto-merge workflow." || echo "issue #$n not closed"
-          done
-          gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$HEAD_REF" || echo "branch $HEAD_REF already gone"
