@@ -1,37 +1,9 @@
 # auto-merge.yml — every ready pull request merges itself once the required checks pass.
 #
-# When a pull request opens ready, is reopened, leaves draft, or takes a new push, this job turns
-# on GitHub's auto-merge with a merge commit, the one merge method the repository allows, and
-# ends. The ruleset on `main` then merges it as soon as the checks it requires pass on its head. A
-# draft is left alone: a pull request opened as a draft starts this job when it is marked ready.
-#
-# GitHub offers auto-merge only on a pull request that cannot merge yet. One whose required check
-# already passed, such as a draft marked ready after its run went green, is refused with
-# `clean status`; that one is merged directly, pinned to the head the check passed on
-# (https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/automatically-merging-a-pull-request).
-#
-# The job acts with an installation token of the organisation's GitHub App `the-hardline-build`,
-# minted by GitHub's `actions/create-github-app-token` and narrowed to this repository with
-# contents and pull requests write. GitHub records the merge as the App's, an ordinary actor's
-# event, so it closes the issues the pull request's closing keywords name, deletes the head branch
-# under the repository's delete-on-merge setting and starts the workflows a merge starts, with
-# nothing left for this job to do. A merge made with the run's GITHUB_TOKEN would start none of
-# that (https://docs.github.com/en/actions/concepts/security/github_token, §When GITHUB_TOKEN
-# triggers workflow runs). The App bypasses no ruleset (construct ADR-0047), so its merge waits for every
-# required check.
-#
-# The App's private key is a secret of the `auto-merge` environment, whose deployment-branch rule
-# admits `main` alone. The job runs on `pull_request_target`, so GitHub runs `main`'s copy of this
-# file with `main` as the job's ref: a pull request that edits this file cannot change the job that
-# reads the key, and no job running on a pull request's own ref can read it. The job runs no code
-# from the pull request: it checks nothing out, calls only `gh`, and passes payload fields to it
-# through `env`.
-#
-# A repository whose ruleset on `main` requires no check would merge a pull request the moment
-# auto-merge went on, before any check ran, so there the job only says so and merges nothing.
-#
-# Ladder: GitHub feature, native auto-merge; the token comes from GitHub's own
-# actions/create-github-app-token, pinned by commit SHA like every action here.
+# The job is construct's reusable workflow, run here on the same event with this repository's
+# `auto-merge` environment, App key secret and client-id variable. What it does, and why it acts
+# as the organisation's GitHub App, is written at its head:
+# https://github.com/the-hardline/construct/blob/main/.github/workflows/auto-merge.yml
 name: auto-merge
 
 on:
@@ -47,53 +19,5 @@ concurrency:
 
 jobs:
   merge:
-    name: auto-merge
-    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    environment: auto-merge
-    permissions:
-      contents: read
-    env:
-      GH_REPO: ${{ github.repository }}
-      PR: ${{ github.event.pull_request.number }}
-      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-    steps:
-      - name: Read the checks the ruleset on main requires
-        id: rules
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          required=$(gh api "repos/$GH_REPO/rules/branches/main" \
-            --jq '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context]')
-          echo "required checks: $required"
-          echo "required=$required" >> "$GITHUB_OUTPUT"
-          if [ "$required" = "[]" ]; then
-            echo "::notice::main requires no status check, so auto-merge would merge before any check ran; nothing is merged until the ruleset requires one."
-          fi
-
-      - name: Mint the App's token for this repository
-        id: app
-        if: steps.rules.outputs.required != '[]'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.BUILD_GITHUB_APP_CLIENT_ID }}
-          private-key: ${{ secrets.BUILD_GITHUB_APP_PRIVATE_KEY }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-pull-requests: write
-
-      - name: Turn on auto-merge, or merge a pull request whose check already passed
-        if: steps.rules.outputs.required != '[]'
-        env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-        run: |
-          if out=$(gh pr merge "$PR" --auto --merge 2>&1); then
-            echo "$out"
-            exit 0
-          fi
-          echo "$out"
-          case "$out" in
-            *"clean status"*) gh pr merge "$PR" --merge --match-head-commit "$HEAD_SHA" ;;
-            *) exit 1 ;;
-          esac
+    uses: the-hardline/construct/.github/workflows/auto-merge.yml@main
+    secrets: inherit
