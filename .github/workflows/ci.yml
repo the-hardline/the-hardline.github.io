@@ -1,5 +1,6 @@
 # CI for the-hardline/the-hardline.github.io: on a pull request, pre-commit over the whole tree
-# (gitleaks alone).
+# (the commit-time gitleaks hook). GitHub secret scanning with push protection is the
+# whole-history secret check.
 # Every action is GitHub's own and pinned by commit SHA; the only credential is the run's github.token.
 name: CI
 
@@ -10,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  # pre-commit over the hooks .pre-commit-config.yaml lists: gitleaks alone.
+  # pre-commit over the hooks .pre-commit-config.yaml lists: the commit-time gitleaks hook.
   check:
     name: pre-commit (whole tree)
     if: github.event_name == 'pull_request'
@@ -38,10 +39,3 @@ jobs:
       # have flagged, so a red run is actionable without reproducing it locally.
       - name: pre-commit run --all-files
         run: pre-commit run --all-files --show-diff-on-failure --color=always
-
-      # The whole-tree secret scan is manual-stage on purpose: `gitleaks dir`
-      # reads untracked and gitignored files, so locally it would block commits
-      # on content that is not in the commit. Here the checkout IS the tracked
-      # tree, which is exactly what it should sweep.
-      - name: gitleaks whole-tree scan
-        run: pre-commit run gitleaks-dir --hook-stage manual --all-files --color=always
