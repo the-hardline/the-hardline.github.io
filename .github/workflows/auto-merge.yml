@@ -27,6 +27,11 @@
 # from the pull request: it checks nothing out, calls only `gh`, and passes payload fields to it
 # through `env`.
 #
+# A push to a draft and the draft being marked ready can start two runs on the same head at once,
+# and the concurrency group keeps only the later one. When the push's run arrives last it cancels
+# the ready run, so a push's run does not trust the draft flag its payload carries: it reads the
+# pull request's live state and stops while it is still a draft.
+#
 # A repository whose ruleset on `main` requires no check would merge a pull request the moment
 # auto-merge went on, before any check ran, so there the job only says so and merges nothing.
 #
@@ -48,7 +53,7 @@ concurrency:
 jobs:
   merge:
     name: auto-merge
-    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    if: (github.event.pull_request.draft == false || github.event.action == 'synchronize') && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: auto-merge
@@ -88,6 +93,11 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
+          draft=$(gh pr view "$PR" --json isDraft --jq .isDraft)
+          if [ "$draft" != "false" ]; then
+            echo "pull request #$PR is still a draft; nothing to do until it is marked ready."
+            exit 0
+          fi
           if out=$(gh pr merge "$PR" --auto --merge 2>&1); then
             echo "$out"
             exit 0
