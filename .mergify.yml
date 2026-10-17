@@ -1,0 +1,41 @@
+# .mergify.yml — Mergify Merge Protections hold the pull requests only the owner merges.
+#
+# Mergify only reports here: this file sets no auto-merge and no queue, so a pull request still
+# merges through GitHub's own auto-merge (`auto-merge.yml`). Each protection below that applies and
+# fails turns the `Mergify Merge Protections` check red, and the ruleset on `main` requires that
+# check, so only the owner merges the pull request, through the ruleset's bypass
+# (https://docs.mergify.com/merge-protections).
+#
+# A pull request into main that changes a gate file (a workflow, `REVIEW.md`,
+# `.claude/settings.json` or this file) fails the `gate files` protection. The success condition
+# repeats the trigger negated, so it can never pass while the rule applies
+# (https://docs.mergify.com/merge-protections/custom-rules).
+#
+# A pull request whose head is `live` is written by a live clone's deploy key, so anything that
+# can write the gateway's state directory chooses its content, and a merge would hand a path to a
+# more privileged reader: build sessions load a repository's `CLAUDE.md`, `AGENTS.md`, `.claude/`
+# and `.mcp.json`. So it fails the `live content` protection unless every path it changes is the
+# agents' own content; anything else waits for the owner. `files` lists a renamed file at both its
+# old and its new path (https://docs.mergify.com/configuration/conditions), and the regular
+# expressions are Python's (https://docs.mergify.com/configuration/data-types), so the success
+# condition reads: no changed path lies outside the allowlist.
+#
+# Mergify reads this file from `main`.
+#
+# Ladder: maintained application, Mergify; a GitHub push ruleset does not gate a pull request's
+# merge, and a required code-owner review cannot hold a pull request its own author opened.
+merge_protections:
+  - name: gate files
+    description: A pull request that changes a workflow, REVIEW.md, .claude/settings.json or .mergify.yml merges only by the owner's hand.
+    if:
+      - base = main
+      - 'files ~= ^(\.github/workflows/|REVIEW\.md$|\.claude/settings\.json$|\.mergify\.yml$)'
+    success_conditions:
+      - '-files ~= ^(\.github/workflows/|REVIEW\.md$|\.claude/settings\.json$|\.mergify\.yml$)'
+  - name: live content
+    description: A pull request from a live clone merges on its own only when every path is the agents' content.
+    if:
+      - base = main
+      - head = live
+    success_conditions:
+      - '-files ~= ^(?!(memory/|MEMORY\.md$|DREAMS\.md$|USER\.md$|STATUS\.md$|drafts/|scratch/|[^/]+\.pdf$|automations/jobs\.json$|openclaw\.json$|tools\.json5$|config/agents/[^/]+\.json5$|index\.md$|inbox\.md$|(sources|entities|concepts|syntheses|reports|_attachments|_views)/))'
