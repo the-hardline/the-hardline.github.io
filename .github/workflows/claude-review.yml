@@ -48,7 +48,7 @@ jobs:
       - name: Join the review instructions
         run: cat README.md REVIEW.md > "$RUNNER_TEMP/review-instructions.md"
 
-      - uses: anthropics/claude-code-action@25e67a749845f3eb2c30bd814f65dca12c3bb8c3 # v1
+      - uses: anthropics/claude-code-action@c0949c50a78c1ec8ce2647db36629b870e715d0c # v1.0.268
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: "https://github.com/anthropics/claude-code.git"

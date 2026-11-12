@@ -1,0 +1,27 @@
+# dependabot.yml — GitHub's Dependabot keeps the pinned versions current.
+#
+# Once a month it opens one grouped pull request per ecosystem: the action SHAs the workflows pin
+# (each bump keeps its `# vX.Y.Z` comment) and the `rev:` pins in .pre-commit-config.yaml.
+# A version is proposed only once it is a week old, so a compromised release has time to be
+# caught and pulled first.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      pre-commit:
+        patterns: ["*"]
